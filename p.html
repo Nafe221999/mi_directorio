@@ -1,0 +1,404 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Plus, ImagePlus, ArrowLeft, ArrowRight, Save, Share2, Download, Upload, Trash2, BookMarked, Import, Wand2, PencilLine, Copy } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+
+// -------------------------------------------------------------
+// Álbum de Recuerdos Interactivo — single-file React component
+// Características clave:
+// - Portada estilo "libro de fantasía" editable
+// - Páginas múltiples con transición tipo paso de página
+// - Subida de fotos con notas por foto
+// - Reordenar fotos dentro de la página (simple: mover arriba/abajo)
+// - Persistencia local (localStorage)
+// - Exportar/Importar .json del álbum
+// - Compartir por mensaje (Web Share API: enlace con estado y/o archivo JSON)
+// - UI en español, diseño con Tailwind + shadcn/ui + framer-motion
+// -------------------------------------------------------------
+
+// Tipos
+const nuevaPagina = () => ({ id: crypto.randomUUID(), titulo: "Página", elementos: [] });
+const nuevoElemento = (dataUrl = "") => ({ id: crypto.randomUUID(), imagen: dataUrl, nota: "", fecha: new Date().toISOString().slice(0,10) });
+
+const STORAGE_KEY = "album_recuerdos_fantasia_v1";
+
+function useLocalState(initial) {
+  const [state, setState] = useState(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : initial;
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
+  }, [state]);
+  return [state, setState];
+}
+
+function base64Encode(str) {
+  try { return btoa(unescape(encodeURIComponent(str))); } catch { return ""; }
+}
+function base64Decode(str) {
+  try { return decodeURIComponent(escape(atob(str))); } catch { return ""; }
+}
+
+export default function AlbumDeRecuerdos() {
+  const [album, setAlbum] = useLocalState({
+    portada: {
+      titulo: "Mi Libro de Recuerdos",
+      subtitulo: "Historias que atesoro",
+      autor: "",
+    },
+    paginas: [nuevaPagina()],
+  });
+
+  const [indice, setIndice] = useState(0); // 0 => portada, 1..n => páginas
+  const esPortada = indice === 0;
+  const paginaActual = esPortada ? null : album.paginas[indice - 1];
+
+  // Manejo de imágenes
+  const fileInputRef = useRef(null);
+  const onElegirImagenes = () => fileInputRef.current?.click();
+  const onFiles = async (files) => {
+    const arr = Array.from(files || []);
+    const dataUrls = await Promise.all(
+      arr.map(
+        (f) =>
+          new Promise((res) => {
+            const r = new FileReader();
+            r.onload = () => res(r.result);
+            r.readAsDataURL(f);
+          })
+      )
+    );
+    setAlbum((a) => {
+      const copia = structuredClone(a);
+      const p = copia.paginas[indice - 1];
+      dataUrls.forEach((d) => p.elementos.push(nuevoElemento(d)));
+      return copia;
+    });
+  };
+
+  // Navegación
+  const puedeAtras = indice > 0;
+  const puedeAdelante = indice < album.paginas.length;
+
+  const irAtras = () => setIndice((i) => Math.max(0, i - 1));
+  const irAdelante = () => setIndice((i) => Math.min(album.paginas.length, i + 1));
+
+  const agregarPagina = () => {
+    setAlbum((a) => ({ ...a, paginas: [...a.paginas, nuevaPagina()] }));
+    setIndice(album.paginas.length + 0); // permanecer en página actual, usuario puede avanzar
+  };
+
+  const eliminarPaginaActual = () => {
+    if (esPortada) return;
+    setAlbum((a) => {
+      const copia = structuredClone(a);
+      copia.paginas = copia.paginas.filter((p) => p.id !== paginaActual.id);
+      return copia;
+    });
+    setIndice((i) => Math.max(0, i - 1));
+  };
+
+  const moverElemento = (id, dir) => {
+    setAlbum((a) => {
+      const copia = structuredClone(a);
+      const p = copia.paginas[indice - 1];
+      const idx = p.elementos.findIndex((e) => e.id === id);
+      if (idx < 0) return a;
+      const nuevoIdx = Math.min(p.elementos.length - 1, Math.max(0, idx + dir));
+      const [it] = p.elementos.splice(idx, 1);
+      p.elementos.splice(nuevoIdx, 0, it);
+      return copia;
+    });
+  };
+
+  const borrarElemento = (id) => {
+    setAlbum((a) => {
+      const copia = structuredClone(a);
+      const p = copia.paginas[indice - 1];
+      p.elementos = p.elementos.filter((e) => e.id !== id);
+      return copia;
+    });
+  };
+
+  // Exportar/Importar
+  const exportarJSON = () => {
+    const blob = new Blob([JSON.stringify(album, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(album.portada.titulo || "album").replaceAll(" ", "_")}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const importarJSON = (file) => {
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const data = JSON.parse(r.result);
+        if (!data?.paginas) throw new Error("Archivo no válido");
+        setAlbum(data);
+        setIndice(0);
+      } catch (e) {
+        alert("No se pudo importar: " + e.message);
+      }
+    };
+    r.readAsText(file);
+  };
+
+  // Compartir
+  const compartir = async () => {
+    try {
+      // Intentar compartir archivo JSON (más fiable para mensajería)
+      const json = new Blob([JSON.stringify(album)], { type: "application/json" });
+      const archivo = new File([json], `${(album.portada.titulo || "album")}.json`, { type: "application/json" });
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [archivo] })) {
+        await navigator.share({
+          title: album.portada.titulo || "Álbum de recuerdos",
+          text: "Mira mi álbum de recuerdos ✨",
+          files: [archivo],
+        });
+        return;
+      }
+      // Si no soporta archivos, probar con enlace con estado embebido
+      const encoded = base64Encode(JSON.stringify(album));
+      const link = `${location.origin}${location.pathname}#album=${encoded}`;
+      if (navigator.share) {
+        await navigator.share({ title: album.portada.titulo, url: link });
+      } else {
+        await navigator.clipboard.writeText(link);
+        alert("Enlace copiado al portapapeles. ¡Pégalo en tu mensaje!");
+      }
+    } catch (e) {
+      alert("No se pudo compartir automáticamente. Prueba exportar el archivo JSON y enviarlo por mensaje.");
+    }
+  };
+
+  // Importación automática desde hash si lo hay
+  useEffect(() => {
+    if (location.hash.startsWith("#album=")) {
+      const raw = location.hash.replace("#album=", "");
+      const decoded = base64Decode(raw);
+      if (decoded) {
+        try {
+          const data = JSON.parse(decoded);
+          if (data?.paginas) setAlbum(data);
+        } catch {}
+      }
+    }
+  }, []);
+
+  // Portada estilo fantasía
+  const Portada = () => (
+    <div className="relative h-full w-full flex items-center justify-center">
+      <div className="absolute inset-0 bg-gradient-to-br from-amber-200 via-emerald-200 to-indigo-300" />
+      <div className="absolute inset-0 mix-blend-soft-light bg-[url('https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?q=80&w=1600&auto=format&fit=crop')] bg-cover bg-center opacity-40" />
+      <div className="absolute inset-0 pointer-events-none">
+        <div className="absolute inset-6 rounded-[2rem] border-4 border-amber-700 shadow-[inset_0_0_80px_rgba(0,0,0,0.35)]" />
+        <div className="absolute inset-10 rounded-[1.5rem] border-2 border-amber-600" />
+      </div>
+      <Card className="relative max-w-2xl w-[90%] bg-white/70 backdrop-blur-md shadow-2xl rounded-3xl p-8">
+        <CardHeader className="text-center">
+          <CardTitle className="text-3xl md:text-5xl font-serif tracking-wide">
+            <Input
+              value={album.portada.titulo}
+              onChange={(e) => setAlbum((a) => ({ ...a, portada: { ...a.portada, titulo: e.target.value } }))}
+              className="text-center text-3xl md:text-5xl font-serif border-none bg-transparent focus-visible:ring-0"
+            />
+          </CardTitle>
+          <div className="mt-2 text-lg opacity-80">
+            <Input
+              value={album.portada.subtitulo}
+              placeholder="Eslogan o dedicatoria"
+              onChange={(e) => setAlbum((a) => ({ ...a, portada: { ...a.portada, subtitulo: e.target.value } }))}
+              className="text-center text-lg font-light border-none bg-transparent focus-visible:ring-0"
+            />
+          </div>
+          <div className="mt-4">
+            <Input
+              value={album.portada.autor}
+              placeholder="Autor/a"
+              onChange={(e) => setAlbum((a) => ({ ...a, portada: { ...a.portada, autor: e.target.value } }))}
+              className="text-center border-none bg-transparent focus-visible:ring-0"
+            />
+          </div>
+        </CardHeader>
+        <CardContent className="flex items-center justify-center">
+          <Button onClick={irAdelante} className="gap-2 text-lg px-6 py-6 rounded-2xl">
+            <Wand2 className="w-5 h-5" /> Entrar al Libro
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
+  );
+
+  // Página
+  const Pagina = ({ pagina }) => (
+    <div className="h-full w-full p-4 md:p-8">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <BookMarked className="w-5 h-5" />
+          <Input
+            value={pagina.titulo}
+            onChange={(e) => {
+              const val = e.target.value;
+              setAlbum((a) => {
+                const copia = structuredClone(a);
+                const p = copia.paginas.find((x) => x.id === pagina.id);
+                p.titulo = val;
+                return copia;
+              });
+            }}
+            className="font-semibold text-lg max-w-[60vw]"
+          />
+        </div>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={onElegirImagenes} className="gap-2"><ImagePlus className="w-4 h-4"/>Añadir fotos</Button>
+          <Button variant="destructive" onClick={eliminarPaginaActual} className="gap-2"><Trash2 className="w-4 h-4"/>Eliminar página</Button>
+          <input type="file" accept="image/*" multiple ref={fileInputRef} onChange={(e)=>onFiles(e.target.files)} className="hidden" />
+        </div>
+      </div>
+
+      {pagina.elementos.length === 0 ? (
+        <div className="h-[65vh] rounded-2xl border-2 border-dashed flex items-center justify-center text-center opacity-70">
+          <div>
+            <ImagePlus className="w-8 h-8 mx-auto mb-2"/>
+            <p>Arrastra y suelta imágenes aquí o usa “Añadir fotos”.</p>
+          </div>
+        </div>
+      ) : (
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 max-h-[65vh] overflow-auto pr-1">
+          {pagina.elementos.map((el, idx) => (
+            <Card key={el.id} className="rounded-2xl overflow-hidden">
+              <div className="aspect-[4/3] bg-neutral-100 flex items-center justify-center overflow-hidden">
+                {el.imagen ? (
+                  <img src={el.imagen} alt="foto" className="w-full h-full object-cover"/>
+                ) : (
+                  <div className="text-sm opacity-60">Sin imagen</div>
+                )}
+              </div>
+              <CardContent className="space-y-2 py-3">
+                <Textarea
+                  value={el.nota}
+                  placeholder="Escribe una nota…"
+                  onChange={(e)=>{
+                    const val = e.target.value;
+                    setAlbum((a)=>{
+                      const copia = structuredClone(a);
+                      const p = copia.paginas[indice-1];
+                      const it = p.elementos.find(x=>x.id===el.id);
+                      it.nota = val;
+                      return copia;
+                    })
+                  }}
+                />
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="date"
+                    value={el.fecha || ""}
+                    onChange={(e)=>{
+                      const val = e.target.value;
+                      setAlbum((a)=>{
+                        const copia = structuredClone(a);
+                        const p = copia.paginas[indice-1];
+                        const it = p.elementos.find(x=>x.id===el.id);
+                        it.fecha = val;
+                        return copia;
+                      })
+                    }}
+                    className="w-40"
+                  />
+                  <div className="ml-auto flex gap-2">
+                    <Button variant="outline" size="icon" onClick={()=>moverElemento(el.id, -1)} title="Subir"><ArrowUpIcon/></Button>
+                    <Button variant="outline" size="icon" onClick={()=>moverElemento(el.id, +1)} title="Bajar"><ArrowDownIcon/></Button>
+                    <Button variant="ghost" size="icon" onClick={()=>borrarElemento(el.id)} title="Borrar"><Trash2 className="w-4 h-4"/></Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-neutral-100 p-3 md:p-6">
+      <div className="mx-auto max-w-6xl">
+        {/* Barra superior */}
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xl md:text-2xl font-serif">📖 Álbum de Recuerdos</span>
+            <span className="text-xs md:text-sm opacity-60">estilo fantasía</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={()=>setIndice(0)} className="gap-2"><PencilLine className="w-4 h-4"/>Portada</Button>
+            <Button variant="secondary" onClick={agregarPagina} className="gap-2"><Plus className="w-4 h-4"/>Nueva página</Button>
+            <label className="inline-flex">
+              <input type="file" accept="application/json" className="hidden" onChange={(e)=> e.target.files?.[0] && importarJSON(e.target.files[0]) } />
+              <Button variant="outline" className="gap-2"><Import className="w-4 h-4"/>Importar</Button>
+            </label>
+            <Button variant="outline" onClick={exportarJSON} className="gap-2"><Download className="w-4 h-4"/>Exportar</Button>
+            <Button onClick={compartir} className="gap-2"><Share2 className="w-4 h-4"/>Compartir</Button>
+          </div>
+        </div>
+
+        {/* Lienzo del libro */}
+        <div className="relative bg-white rounded-[2rem] shadow-xl border overflow-hidden min-h-[78vh]">
+          <div className="absolute top-3 left-3 z-20 flex gap-2">
+            <Button variant="ghost" size="icon" disabled={!puedeAtras} onClick={irAtras}><ArrowLeft className="w-5 h-5"/></Button>
+            <Button variant="ghost" size="icon" disabled={!puedeAdelante} onClick={irAdelante}><ArrowRight className="w-5 h-5"/></Button>
+          </div>
+
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={indice}
+              initial={{ rotateY: esPortada ? 0 : -90, opacity: 0.6 }}
+              animate={{ rotateY: 0, opacity: 1 }}
+              exit={{ rotateY: 90, opacity: 0 }}
+              transition={{ duration: 0.45, ease: "easeInOut" }}
+              className="origin-left [transform-style:preserve-3d]"
+            >
+              <div className="h-[78vh]">
+                {esPortada ? <Portada/> : <Pagina pagina={paginaActual}/>} 
+              </div>
+            </motion.div>
+          </AnimatePresence>
+        </div>
+
+        {/* Paginador inferior */}
+        <div className="flex items-center justify-center gap-2 mt-3 flex-wrap">
+          <MiniTab activo={indice===0} onClick={()=>setIndice(0)} etiqueta="Portada"/>
+          {album.paginas.map((p, i) => (
+            <MiniTab key={p.id} activo={indice===i+1} onClick={()=>setIndice(i+1)} etiqueta={`${i+1}`}/>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MiniTab({ activo, onClick, etiqueta }) {
+  return (
+    <button onClick={onClick} className={`px-3 py-1 rounded-full text-sm border ${activo ? "bg-black text-white" : "bg-white hover:bg-neutral-50"}`}>
+      {etiqueta}
+    </button>
+  );
+}
+
+function ArrowUpIcon() {
+  return <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-arrow-up"><line x1="12" x2="12" y1="19" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+}
+function ArrowDownIcon() {
+  return <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-arrow-down"><line x1="12" x2="12" y1="5" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>
+}
